@@ -1,0 +1,203 @@
+version: "3.9"
+
+services:
+  # ─────────────────────────────────────────
+  # Infrastructure
+  # ─────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rag_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-ragdb}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: rag_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─────────────────────────────────────────
+  # Ollama nodes
+  # ─────────────────────────────────────────
+  ollama1:
+    image: ollama/ollama:latest
+    container_name: rag_ollama1
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=4
+    volumes:
+      - ollama1_data:/root/.ollama
+    ports:
+      - "11435:11434"
+    entrypoint: >
+      sh -c "
+        ollama serve &
+        sleep 3 &&
+        ollama pull ${LLM_MODEL:-llama3:8b-instruct-q4_K_M} &&
+        wait
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+
+  ollama2:
+    image: ollama/ollama:latest
+    container_name: rag_ollama2
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=4
+    volumes:
+      - ollama2_data:/root/.ollama
+    ports:
+      - "11436:11434"
+    entrypoint: >
+      sh -c "
+        ollama serve &
+        sleep 3 &&
+        ollama pull ${LLM_MODEL:-llama3:8b-instruct-q4_K_M} &&
+        wait
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+
+  # ─────────────────────────────────────────
+  # Backend API
+  # ─────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: rag_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DB_HOST=postgres
+      - DB_USER=${POSTGRES_USER:-rag}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-ragpassword}
+      - DB_NAME=${POSTGRES_DB:-ragdb}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - LLM_MODEL=${LLM_MODEL:-llama3:8b-instruct-q4_K_M}
+      - OLLAMA_NODES=http://ollama1:11434,http://ollama2:11434
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production-32chars!!}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./uploads:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────────────────────────────
+  # Health worker
+  # ─────────────────────────────────────────
+  health_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: rag_health_worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OLLAMA_NODES=http://ollama1:11434,http://ollama2:11434
+      - LLM_MODEL=${LLM_MODEL:-llama3:8b-instruct-q4_K_M}
+      - HEALTH_INTERVAL=5
+      - MAX_IN_FLIGHT=4
+
+  # ─────────────────────────────────────────
+  # Frontend
+  # ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    container_name: rag_frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "3000:80"
+
+  # ─────────────────────────────────────────
+  # Monitoring
+  # ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: rag_prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: rag_grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3001:3000"
+
+volumes:
+  postgres_data:
+  redis_data:
+  ollama1_data:
+  ollama2_data:
+  prometheus_data:
+  grafana_data:
