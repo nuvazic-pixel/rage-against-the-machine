@@ -1,7 +1,21 @@
 import asyncpg
+import json
+import math
+from uuid import UUID
 from app.config import get_settings
 
 _pool: asyncpg.Pool | None = None
+
+
+def vector_literal(values: list[float]) -> str:
+    """No custom pgvector codec is registered: bind its finite text format."""
+    if type(values) is not list or not values or any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
+        raise ValueError("Embedding must be a non-empty finite numeric vector")
+    return json.dumps(values, allow_nan=False, separators=(",", ":"))
+
+
+def uuid_value(value):
+    return value if isinstance(value, UUID) else UUID(value)
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -57,8 +71,8 @@ async def insert_chunk(
                 embedding = EXCLUDED.embedding,
                 metadata = EXCLUDED.metadata
         """,
-        document_id, collection_id, user_id,
-        chunk_index, text, embedding, metadata,
+        uuid_value(document_id), uuid_value(collection_id), uuid_value(user_id),
+        chunk_index, text, vector_literal(embedding), json.dumps(metadata, allow_nan=False),
     )
 
 
@@ -80,7 +94,7 @@ async def vector_search(
             ORDER BY embedding <=> $1::vector
             LIMIT $4
             """,
-            query_embedding, user_id, collection_id, top_k,
+            vector_literal(query_embedding), uuid_value(user_id), uuid_value(collection_id), top_k,
         )
     else:
         rows = await pool.fetch(
@@ -92,14 +106,14 @@ async def vector_search(
             ORDER BY embedding <=> $1::vector
             LIMIT $3
             """,
-            query_embedding, user_id, top_k,
+            vector_literal(query_embedding), uuid_value(user_id), top_k,
         )
 
     return [
         {
             "id": r["id"],
             "text": r["text"],
-            "metadata": dict(r["metadata"]) if r["metadata"] else {},
+            "metadata": json.loads(r["metadata"]) if isinstance(r["metadata"], str) else dict(r["metadata"] or {}),
             "document_id": str(r["document_id"]),
             "distance": float(r["distance"]),
         }
@@ -121,7 +135,7 @@ async def update_document_status(
         SET status = $1, chunk_count = $2, char_count = $3, error_msg = $4
         WHERE id = $5
         """,
-        status, chunk_count, char_count, error_msg, doc_id,
+        status, chunk_count, char_count, error_msg, uuid_value(doc_id),
     )
 
 
@@ -134,11 +148,11 @@ async def get_collection_chunks_for_bm25(
     if collection_id:
         rows = await pool.fetch(
             "SELECT id, text FROM chunks WHERE user_id = $1 AND collection_id = $2",
-            user_id, collection_id,
+            uuid_value(user_id), uuid_value(collection_id),
         )
     else:
         rows = await pool.fetch(
             "SELECT id, text FROM chunks WHERE user_id = $1",
-            user_id,
+            uuid_value(user_id),
         )
     return [{"id": r["id"], "text": r["text"]} for r in rows]

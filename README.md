@@ -73,3 +73,14 @@ Upgrade: `UPDATE users SET plan = 'pro' WHERE email = '...';`
 ## Supported File Types
 
 .txt · .md · .py · .js · .ts · .json · .csv · .yaml · .yml · .pdf (needs `pypdf`)
+
+## EAON continuity integration
+
+A read-only, authenticated evidence endpoint is available at `/chat/evidence`.
+It requires an explicit owned collection, bypasses the search-result cache and
+returns source fragments with IDs and SHA-256 digests, without generating an answer.
+See [the contract, boundaries and test commands](docs/EAON_EVIDENCE_API.md).
+
+The root application remains canonical; the existing `rag-saas/` entrypoint is
+kept compatible. Contract tests are now included; a production deployment and
+real-model retrieval evaluation remain separate validation work.
