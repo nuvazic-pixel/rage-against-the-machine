@@ -11,7 +11,7 @@ from app.db.postgres import init_db, close_db
 from app.utils.cache import init_redis, close_redis
 from app.services.embedding import get_batcher as get_emb_batcher, get_model
 from app.services.reranker import get_batcher as get_rerank_batcher, get_reranker
-from app.api import auth, collections, documents, chat, system
+from app.api import auth, collections, documents, chat, system, evidence
 
 log = structlog.get_logger()
 
@@ -75,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(collections.router)
     app.include_router(documents.router)
     app.include_router(chat.router)
+    app.include_router(evidence.router)
 
     return app
 

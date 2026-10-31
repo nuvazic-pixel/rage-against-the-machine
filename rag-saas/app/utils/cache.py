@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 import redis.asyncio as aioredis
 from app.config import get_settings
 from app.utils.text import stable_cache_key
@@ -31,29 +32,34 @@ async def close_redis() -> None:
         _redis = None
 
 
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Search result cache
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-async def get_cached_search(query: str, user_id: str) -> list[dict] | None:
+def search_cache_key(query: str, user_id: str, collection_id: str | None = None) -> str:
+    scope = json.dumps(["v2", str(user_id), collection_id, query], separators=(",", ":"), ensure_ascii=False)
+    return "rag_search_v2:" + sha256(scope.encode("utf-8")).hexdigest()
+
+
+async def get_cached_search(query: str, user_id: str, collection_id: str | None = None) -> list[dict] | None:
     r = await get_redis()
-    key = stable_cache_key(f"{user_id}:{query}", prefix="rag_search")
+    key = search_cache_key(query, user_id, collection_id)
     raw = await r.get(key)
     if raw:
         return json.loads(raw)
     return None
 
 
-async def set_cached_search(query: str, user_id: str, results: list[dict]) -> None:
+async def set_cached_search(query: str, user_id: str, results: list[dict], collection_id: str | None = None) -> None:
     r = await get_redis()
-    key = stable_cache_key(f"{user_id}:{query}", prefix="rag_search")
+    key = search_cache_key(query, user_id, collection_id)
     cfg = get_settings()
     await r.setex(key, cfg.cache_ttl_seconds, json.dumps(results))
 
 
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Embedding cache
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def get_cached_embedding(text: str) -> list[float] | None:
     r = await get_redis()
@@ -70,9 +76,9 @@ async def set_cached_embedding(text: str, embedding: list[float]) -> None:
     await r.setex(key, 3600, json.dumps(embedding))  # 1h TTL for embeddings
 
 
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Rate limiting
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def check_rate_limit(user_id: str, plan: str) -> tuple[bool, int]:
     """

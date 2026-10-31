@@ -22,8 +22,17 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_ctx.verify(plain, hashed)
 
 
-def create_token(user_id: str, email: str) -> str:
+def auth_settings():
     cfg = get_settings()
+    if cfg.environment == "production" and (
+        cfg.secret_key == "change-me-in-production-32chars!!" or len(cfg.secret_key) < 32
+    ):
+        raise HTTPException(503, "Configure a non-default JWT signing key before using production auth")
+    return cfg
+
+
+def create_token(user_id: str, email: str) -> str:
+    cfg = auth_settings()
     expire = datetime.now(timezone.utc) + timedelta(
         minutes=cfg.access_token_expire_minutes
     )
@@ -32,7 +41,7 @@ def create_token(user_id: str, email: str) -> str:
 
 
 def decode_token(token: str) -> dict:
-    cfg = get_settings()
+    cfg = auth_settings()
     try:
         return jwt.decode(token, cfg.secret_key, algorithms=[cfg.algorithm])
     except JWTError:
@@ -42,9 +51,9 @@ def decode_token(token: str) -> dict:
         )
 
 
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # DB helpers
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def create_user(email: str, password: str) -> dict:
     pool = await get_pool()
@@ -88,19 +97,23 @@ async def authenticate_user(email: str, password: str) -> dict:
 
 
 async def get_user_by_id(user_id: str) -> dict | None:
+    try:
+        user_key = uuid.UUID(user_id)
+    except (ValueError, TypeError, AttributeError):
+        return None
     pool = await get_pool()
     row = await pool.fetchrow(
         "SELECT id, email, plan, is_active FROM users WHERE id = $1",
-        user_id,
+        user_key,
     )
-    if not row:
+    if not row or not row["is_active"]:
         return None
     return {"id": str(row["id"]), "email": row["email"], "plan": row["plan"]}
 
 
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # FastAPI dependency
-# ─────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer),

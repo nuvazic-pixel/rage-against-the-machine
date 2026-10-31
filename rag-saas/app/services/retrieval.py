@@ -3,15 +3,13 @@ Retrieval pipeline:
   1. Vector search (pgvector, top_k=50)
   2. BM25 fusion (global corpus, aligned by doc ID)
   3. Score normalization + weighted fusion
-  4. CrossEncoder reranking (top 5 → top 3)
+  4. CrossEncoder reranking (top 5 â†’ top 3)
 """
 import json
 from rank_bm25 import BM25Okapi
 
 from app.config import get_settings
 from app.db.postgres import vector_search, get_collection_chunks_for_bm25
-from app.services.embedding import embed_text
-from app.services.reranker import rerank_docs
 from app.utils.text import tokenize, min_max_normalize
 from app.utils.cache import get_cached_search, set_cached_search
 import structlog
@@ -23,23 +21,26 @@ async def retrieve(
     query: str,
     user_id: str,
     collection_id: str | None = None,
+    *, use_cache: bool = True,
 ) -> list[dict]:
     """
     Full hybrid retrieval. Returns top-k ranked chunks.
-    Uses Redis cache — identical queries within TTL are free.
+    Uses Redis cache â€” identical queries within TTL are free.
     """
+    from app.services.embedding import embed_text
+    from app.services.reranker import rerank_docs
     cfg = get_settings()
 
-    # ── 1. Cache check
-    cached = await get_cached_search(query, user_id)
+    # â”€â”€ 1. Cache check
+    cached = await get_cached_search(query, user_id, collection_id) if use_cache else None
     if cached is not None:
         log.debug("cache_hit", user=user_id)
         return cached
 
-    # ── 2. Embed query
+    # â”€â”€ 2. Embed query
     query_emb = await embed_text(query)
 
-    # ── 3. Vector search
+    # â”€â”€ 3. Vector search
     vec_results = await vector_search(
         query_embedding=query_emb,
         user_id=user_id,
@@ -50,17 +51,17 @@ async def retrieve(
     if not vec_results:
         return []
 
-    # ── 4. BM25 over full user corpus
+    # â”€â”€ 4. BM25 over full user corpus
     corpus = await get_collection_chunks_for_bm25(user_id, collection_id)
 
-    # Map chunk_id → BM25 index position
+    # Map chunk_id â†’ BM25 index position
     id_to_idx: dict[int, int] = {doc["id"]: i for i, doc in enumerate(corpus)}
 
     tokenized_corpus = [tokenize(doc["text"]) for doc in corpus]
     bm25 = BM25Okapi(tokenized_corpus)
     bm25_all = bm25.get_scores(tokenize(query))
 
-    # ── 5. Normalize + fuse scores
+    # â”€â”€ 5. Normalize + fuse scores
     distances = [d["distance"] for d in vec_results]
     vec_scores = [1.0 - x for x in min_max_normalize(distances)]
 
@@ -80,15 +81,16 @@ async def retrieve(
             + cfg.bm25_weight * bm25_scores_norm[i]
         )
 
-    # ── 6. Take top 5 for reranking
+    # â”€â”€ 6. Take top 5 for reranking
     top5 = sorted(vec_results, key=lambda d: d["fused_score"], reverse=True)[: cfg.rerank_top_n]
 
-    # ── 7. CrossEncoder rerank → top 3
+    # â”€â”€ 7. CrossEncoder rerank â†’ top 3
     reranked = await rerank_docs(query, top5)
     final = reranked[: cfg.final_top_k]
 
-    # ── 8. Cache and return
-    await set_cached_search(query, user_id, final)
+    # â”€â”€ 8. Cache and return
+    if use_cache:
+        await set_cached_search(query, user_id, final, collection_id)
     return final
 
 
